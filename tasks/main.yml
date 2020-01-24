@@ -1,0 +1,125 @@
+---
+# tasks file for ansible-role-ocp-copy-machineconfig
+
+- name: Copy-MachingConfig - Create MachineConfig and MachineConfigPool
+  block:
+    - name: Create temp directory for doing work in
+      command: mktemp -d /tmp/ocp-copy-machingconfig-XXXXXX
+      register: mktemp
+      changed_when: False
+      check_mode: no
+
+    - set_fact:
+        workdir: "{{ mktemp.stdout }}"
+
+    - name: createtemporary folder structure
+      file:
+        path: '{{ workdir }}'
+        state: directory
+
+    - name: Copy-MachingConfig - Get machineconfigs for existing config
+      delegate_to: localhost
+      set_fact:
+        mc_result: "{{ lookup('k8s', kubeconfig=kube_config_path, kind='MachineConfig', label_selector='machineconfiguration.openshift.io/role=' + base_machineconfig_name) }}"
+
+    - name: Copy-MachingConfig - Update MC to new type and write to working dir
+      copy:
+          dest: "{{ workdir }}/{{ mc.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}.yml"
+          content: "{{ mc | regex_replace(base_machineconfig_name, machineconfig_name) }}"
+      loop: "{{ mc_result }}"
+      loop_control:
+        loop_var: mc
+
+    - name: Copy-MachingConfig - Clean config
+      json_patch:
+        src: "{{ workdir }}/{{ mc.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}.yml"
+        pretty: yes
+        operations:
+          - op: remove
+            path: "/metadata/uid"
+          - op: remove
+            path: "/metadata/selfLink"
+          - op: remove
+            path: "/metadata/resourceVersion"
+          - op: remove
+            path: "/metadata/creationTimestamp"
+          - op: remove
+            path: "/metadata/generation"
+      loop: "{{ mc_result }}"
+      loop_control:
+        loop_var: mc
+
+    - name: Copy-MachingConfig - Get machineconfigpool for existing config
+      delegate_to: localhost
+      set_fact:
+        mcp_result: "{{ lookup('k8s', kubeconfig=kube_config_path, kind='MachineConfigPool', resource_name=base_machineconfig_name) }}"
+
+    - name: Copy-MachingConfig - Update MCP to new type and write to working dir
+      copy:
+          dest: "{{ workdir }}/{{ mcp_result.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}.yml"
+          content: "{{ mcp_result | regex_replace(base_machineconfig_name, machineconfig_name) }}"
+
+    - name: Copy-MachingConfig - Clean config
+      json_patch:
+        src: "{{ workdir }}/{{ mcp_result.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}.yml"
+        pretty: yes
+        operations:
+          - op: remove
+            path: "/spec/clusterIP"
+          - op: remove
+            path: "/metadata/uid"
+          - op: remove
+            path: "/metadata/selfLink"
+          - op: remove
+            path: "/metadata/resourceVersion"
+          - op: remove
+            path: "/metadata/creationTimestamp"
+          - op: remove
+            path: "/metadata/generation"
+          - op: remove
+            path: "/status"
+          - op: remove
+            path: "/spec/configuration"
+
+    - name: Copy-MachingConfig - List config files
+      find:
+        paths: "{{ workdir }}"
+      register: mc_configs
+
+    - name: Copy-MachingConfig - Fetch configs locally
+      fetch: 
+        src: "{{ mc_src.path }}"
+        dest: "{{ workdir }}-local/"
+        flat: yes
+      loop: "{{ mc_configs.files }}"
+      loop_control:
+        loop_var: mc_src
+
+    - name: Copy-MachingConfig - Apply MachineConfigs to cluster
+      delegate_to: localhost
+      k8s:
+        kind: MachineConfig
+        name: "mc.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}"
+        resource_definition: "{{ lookup('file', workdir + '-local/' + (mc.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name)) + '.yml') }}"
+        state: "present"
+        apply: yes
+        kubeconfig: "{{ kube_config_path }}"
+      loop: "{{ mc_result }}"
+      loop_control:
+        loop_var: mc
+
+    - name: Copy-MachingConfig - Apply MachineConfigs to cluster
+      delegate_to: localhost
+      k8s:
+        kind: MachineConfigPool
+        name: "mc.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name) }}"
+        resource_definition: "{{ lookup('file', workdir + '-local/' + (mcp_result.metadata.name | regex_replace(base_machineconfig_name, machineconfig_name)) + '.yml') }}"
+        state: "present"
+        apply: yes
+        kubeconfig: "{{ kube_config_path }}"
+
+  always:
+    - name: clean up the temporary folder structure
+      file:
+        path: '{{ workdir }}'
+        state: absent
